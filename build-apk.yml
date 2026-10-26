@@ -1,0 +1,106 @@
+name: Build KP DEX APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'index.html'
+      - 'assets/**'
+      - '.github/workflows/build-apk.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check branding assets exist
+        run: |
+          for f in icon-only icon-foreground icon-background splash; do
+            test -f "assets/$f.png" || { echo "::error::assets/$f.png is missing. Upload the 4 icon/splash PNGs into the assets folder."; exit 1; }
+          done
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Capacitor
+        run: |
+          npm init -y
+          npm install @capacitor/core@7 @capacitor/cli@7 @capacitor/android@7 @capacitor/splash-screen@7
+          npm install -D @capacitor/assets@3
+          mkdir -p www
+          cp index.html www/index.html
+
+      - name: Configure KP DEX
+        run: |
+          cat > capacitor.config.json <<'JSON'
+          {
+            "appId": "com.cursusupscin.kpdex",
+            "appName": "KP DEX",
+            "webDir": "www",
+            "backgroundColor": "#05060A",
+            "server": {
+              "url": "https://cursusupscin-ias.github.io/KPDEX/",
+              "cleartext": false
+            },
+            "plugins": {
+              "SplashScreen": {
+                "launchShowDuration": 1200,
+                "launchAutoHide": true,
+                "backgroundColor": "#05060A",
+                "androidScaleType": "CENTER_INSIDE",
+                "showSpinner": false
+              }
+            }
+          }
+          JSON
+
+      - name: Create Android project
+        run: npx cap add android
+
+      - name: Generate launcher icon and splash screen
+        run: |
+          npx capacitor-assets generate --android \
+            --iconBackgroundColor '#05060A' --iconBackgroundColorDark '#05060A' \
+            --splashBackgroundColor '#05060A' --splashBackgroundColorDark '#05060A'
+          find android/app/src/main/res -name 'ic_launcher_foreground*' | grep -q . \
+            || { echo "::error::Icon generation produced no launcher icons"; exit 1; }
+          find android/app/src/main/res -iname 'splash*' | grep -q . \
+            || { echo "::error::Splash generation produced no splash images"; exit 1; }
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Restore fixed signing key (optional)
+        env:
+          KS: ${{ secrets.DEBUG_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KS" ]; then
+            mkdir -p ~/.android && echo "$KS" | base64 -d > ~/.android/debug.keystore
+            echo "Using the fixed signing key."
+          else
+            echo "::warning::No DEBUG_KEYSTORE_B64 secret. This build gets a random signing key, so it cannot update an older install."
+          fi
+
+      - name: Build APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: KP-DEX-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
